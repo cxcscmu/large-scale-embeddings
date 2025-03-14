@@ -15,7 +15,7 @@ Add-ons:
 `cd tevatron`  
 `pip install -e .`  
 
-Create a local.env file where you set the following environment variable:
+On the root folder, create a local.env file where you set the following environment variable:
 
 `HF_HOME=...`
 
