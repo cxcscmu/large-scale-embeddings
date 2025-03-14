@@ -172,3 +172,16 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+logs/*
+!logs/README.md
+tevatron/.idea/
+tevatron/__pycache__/
+tevatron/*.egg-info/
+
+tevatron/wandb
+tevatron/logs
+tevatron/qrels
+tevatron/GradCache
+
+local.env
