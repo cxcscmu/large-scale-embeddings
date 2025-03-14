@@ -40,7 +40,7 @@ python -m tevatron.retriever.driver.encode \
     --passage_prefix "" \
     --encode_is_query \
     --per_device_eval_batch_size 300 \
-    --query_max_len 32 \
+    --query_max_len 64 \
     --passage_max_len 512 \
     --dataset_path $PATH_TO_QUERIES \
     --encode_output_path $EMBEDDING_OUTPUT_DIR/sample_queries.pkl
