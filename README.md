@@ -24,7 +24,7 @@ This should be the path for the huggingface cache. set it accordingly to cluster
 In the future, if needed, HF_TOKEN should be set here too.
 
 
-## Inference: MiniCPM-Embedding on ClueWeb documents
+## Inference: MiniCPM-Embedding-Light on ClueWeb documents
 
 Check experiments folder for details on the scripts.
 
