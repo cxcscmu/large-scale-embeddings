@@ -11,7 +11,7 @@
 eval "$(conda shell.bash hook)"
 conda activate minicpmembed
 
-EMBEDDING_OUTPUT_DIR=/data/group_data/cx_group/large_scale_index/temp/MiniCPM-Embedding
+EMBEDDING_OUTPUT_DIR=/data/group_data/cx_group/large_scale_index/temp/MiniCPM-Embedding-Light
 
 set -f && python -m tevatron.retriever.driver.search \
     --query_reps $EMBEDDING_OUTPUT_DIR/sample_queries.pkl \

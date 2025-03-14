@@ -22,9 +22,9 @@ echo $HF_HOME
 
 PATH_TO_QUERIES="/data/group_data/cx_group/large_scale_index/temp/MiniCPM-Embedding/sample_queries.jsonl"
 
-PATH_TO_MODEL=openbmb/MiniCPM-Embedding
+PATH_TO_MODEL=openbmb/MiniCPM-Embedding-Light
 
-EMBEDDING_OUTPUT_DIR=/data/group_data/cx_group/large_scale_index/temp/MiniCPM-Embedding
+EMBEDDING_OUTPUT_DIR=/data/group_data/cx_group/large_scale_index/temp/MiniCPM-Embedding-Light
 
 mkdir -p $EMBEDDING_OUTPUT_DIR
 
