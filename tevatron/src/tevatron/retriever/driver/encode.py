@@ -105,8 +105,29 @@ def main():
         print("Set encoding precision: bf16")
         dtype = torch.bfloat16
 
+    # preemption support 
+    batch_output_path = data_args.encode_output_path + ".temp_emb"
+    batch_indices_output_path = data_args.encode_output_path + ".temp_idx"
+    if os.path.exists(batch_output_path) and os.path.exists(batch_indices_output_path): 
+        with open(batch_indices_output_path, 'rb') as f:
+            lookup_indices = pickle.load(f) 
+        with open(batch_output_path, 'rb') as f:
+            encoded = pickle.load(f) 
+        starting_id = lookup_indices[-1]
+        start = False 
+    else: 
+        start = True 
+
     print("Starting to encode.")
     for (batch_ids, batch) in tqdm(encode_loader):
+
+        # skip completed batches 
+        if not start: 
+            # continue from next batch  
+            if starting_id == batch_ids[-1]: 
+                start = True
+            continue
+
         lookup_indices.extend(batch_ids)
         with torch.cuda.amp.autocast(dtype=dtype) if dtype is not None else nullcontext():
             with torch.no_grad():
@@ -119,10 +140,30 @@ def main():
                     model_output: EncoderOutput = model(passage=batch)
                     encoded.append(model_output.p_reps.cpu().detach().numpy())
 
+        # preemption support: save per 50 batches 
+        if (len(lookup_indices) // len(batch_ids)) % training_args.inference_save_step == 0: 
+            with open(batch_output_path, 'wb') as f:
+                pickle.dump(encoded, f)
+            with open(batch_indices_output_path, 'wb') as f:
+                pickle.dump(lookup_indices, f)
+            logger.info("saving checkpoint...")
+
+
+    # check if all data elements for this shard present 
+    assert len(lookup_indices) == len(encode_dataset)
+    for i in range(len(encode_dataset)): 
+        assert encode_dataset[i][0] == lookup_indices[i], f"The {i}th element from lookup indices is different from the corresponding element in the datasets"
+
     encoded = np.concatenate(encoded)
 
     with open(data_args.encode_output_path, 'wb') as f:
         pickle.dump((encoded, lookup_indices), f)
+
+    # remove the preemption files 
+    if os.path.exists(batch_indices_output_path):
+        os.remove(batch_indices_output_path)  
+    if os.path.exists(batch_output_path): 
+        os.remove(batch_output_path)
 
 
 if __name__ == "__main__":
