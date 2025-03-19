@@ -1,3 +1,4 @@
+import os
 import random
 from typing import List, Tuple
 
@@ -7,6 +8,7 @@ from torch.utils.data import Dataset
 from huggingface_hub import login
 
 from tevatron.retriever.arguments import DataArguments
+from tevatron.utils.ClueWeb22Api import ClueWeb22Api, create_shards
 
 from transformers import BatchEncoding
 
@@ -341,6 +343,69 @@ class EncodeDataset(Dataset):
             formated_text = format_passage(
                 text["text"],
                 text["title"],
+                self.data_args.passage_prefix,
+                self.data_args.add_markers,
+            )
+
+        return text_id, formated_text
+
+
+class EncodeDataset_MARCOWeb(Dataset):
+
+    def __init__(self, data_args: DataArguments):
+        self.data_args = data_args
+
+        # simply record all possible lines and the corresponding cwid 
+        self.dataset_dir = self.data_args.dataset_path
+        self.encode_data = []
+
+        for lang in self.data_args.langs: 
+            lang_dir = os.path.join(self.dataset_dir, lang)
+            num_json_shards = len(os.listdir(lang_dir)) // 2
+            for jsongz_id in range(0, num_json_shards):
+                jjsongz_id = str(jsongz_id).zfill(2)
+                jsongz_record_path = os.path.join(lang_dir, f"{lang}-{jjsongz_id}.offset")
+                with open(jsongz_record_path, 'r') as fp:
+                    total_lines_in_jsongz = len(fp.readlines()) - 1 # extra lines per file 
+                    # record all possible id in the json 
+                    for doc_id in range(total_lines_in_jsongz): 
+                        ddoc_id = str(doc_id).zfill(5)
+                        self.encode_data.append(f"clueweb22-en-{jjsongz_id}-{ddoc_id}")
+        logger.info(f"EncodeDataset_MARCOWeb total length: {len(self.encode_data)}")
+
+        if self.data_args.dataset_number_of_shards > 1:
+            self.encode_data = create_shards(
+                data=self.encode_data, 
+                num_shards=self.data_args.dataset_number_of_shards, 
+                index=self.data_args.dataset_shard_index
+            )
+        logger.info(f"EncodeDataset_MARCOWeb shard {self.data_args.dataset_shard_index} length: {len(self.encode_data)}")
+
+
+    def __len__(self):
+        return len(self.encode_data)
+
+    def __getitem__(self, item) -> Tuple[str, str]:
+
+        # TODO: query processing 
+        if self.data_args.encode_is_query:
+            text = self.encode_data[item]
+            text_id = text["query_id"]
+            formated_text = format_query(text["query"], self.data_args.query_prefix)
+        else:
+            
+            cweb_doc_id = self.encode_data[item]
+            clueweb_api = ClueWeb22Api(cweb_doc_id, self.dataset_dir)
+
+            clean_txt = eval(clueweb_api.get_marcoweb_clean_text())
+            text_id = clean_txt["ClueWeb22-ID"]
+            content = clean_txt["Clean-Text"]
+            title = content.split('\n')[0].replace("\n", "").replace("\t", "").replace("\r", "").replace("\'", "").replace("\"", "").strip()
+            content = content.replace("\n", "").replace("\t", "").replace("\r", "").replace("\'", "").replace("\"", "").strip()
+                
+            formated_text = format_passage(
+                content,
+                title,
                 self.data_args.passage_prefix,
                 self.data_args.add_markers,
             )

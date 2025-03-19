@@ -15,9 +15,10 @@ from transformers import (
     HfArgumentParser,
 )
 
-from tevatron.retriever.arguments import ModelArguments, DataArguments, \
+from tevatron.retriever.arguments import ModelArguments, \
+    TevatronDataArguments as DataArguments, \
     TevatronTrainingArguments as TrainingArguments
-from tevatron.retriever.dataset import EncodeDataset
+from tevatron.retriever.dataset import EncodeDataset, EncodeDataset_MARCOWeb
 from tevatron.retriever.collator import EncodeCollator
 from tevatron.retriever.modeling import EncoderOutput, DenseModel
 
@@ -69,7 +70,12 @@ def main():
         torch_dtype=torch_dtype
     )
 
-    encode_dataset = EncodeDataset(
+    if data_args.clueweb_api_dataset: 
+        dataset_obj = EncodeDataset_MARCOWeb
+    else: 
+        dataset_obj = EncodeDataset
+        
+    encode_dataset = dataset_obj(
         data_args=data_args,
     )
 
