@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 from transformers import TrainingArguments
 
+from typing import List
+
 
 @dataclass
 class ModelArguments:
@@ -155,6 +157,11 @@ class DataArguments:
     )
 
 
+@dataclass 
+class TevatronDataArguments(DataArguments): 
+    clueweb_api_dataset: bool = field(default=False, metadata={"help": "Whether this dataset needs clueweb api for dynamic generation"})
+    langs: List[str] = field(default_factory=lambda: ["de", "en", "es", "fr", "it", "ja", "nl", "other", "pl", "pt", "zh_chs"], metadata={"help": "Languages to process for the clueweb api"})
+
 @dataclass
 class TevatronTrainingArguments(TrainingArguments):
     warmup_ratio: float = field(default=0.1)
@@ -162,3 +169,4 @@ class TevatronTrainingArguments(TrainingArguments):
     grad_cache: bool = field(default=False, metadata={"help": "Use gradient cache update"})
     gc_q_chunk_size: int = field(default=4)
     gc_p_chunk_size: int = field(default=32)
+
