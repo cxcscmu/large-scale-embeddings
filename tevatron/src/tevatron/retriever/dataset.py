@@ -1,6 +1,7 @@
 import os
 import random
 from typing import List, Tuple
+import pandas as pd
 
 from datasets import load_dataset, load_from_disk
 from torch.utils.data import Dataset
@@ -357,20 +358,28 @@ class EncodeDataset_MARCOWeb(Dataset):
 
         # simply record all possible lines and the corresponding cwid 
         self.dataset_dir = self.data_args.dataset_path
-        self.encode_data = []
 
-        for lang in self.data_args.langs: 
-            lang_dir = os.path.join(self.dataset_dir, lang)
-            num_json_shards = len(os.listdir(lang_dir)) // 2
-            for jsongz_id in range(0, num_json_shards):
-                jjsongz_id = str(jsongz_id).zfill(2)
-                jsongz_record_path = os.path.join(lang_dir, f"{lang}-{jjsongz_id}.offset")
-                with open(jsongz_record_path, 'r') as fp:
-                    total_lines_in_jsongz = len(fp.readlines()) - 1 # extra lines per file 
-                    # record all possible id in the json 
-                    for doc_id in range(total_lines_in_jsongz): 
-                        ddoc_id = str(doc_id).zfill(5)
-                        self.encode_data.append(f"clueweb22-en-{jjsongz_id}-{ddoc_id}")
+        self.encode_data = []
+        if self.data_args.encode_is_query:
+            # query: directly read csv 
+            data = pd.read_csv(self.data_args.dataset_path, sep='\t', header=None)
+            self.encode_data = [
+                {'query_id': qid, "query": query} for qid, query in zip(list(data.iloc[:, 0]), list(data.iloc[:, 1]))
+            ]
+        else: 
+            for lang in self.data_args.langs: 
+                lang_dir = os.path.join(self.dataset_dir, lang)
+                num_json_shards = len(os.listdir(lang_dir)) // 2
+                for jsongz_id in range(0, num_json_shards):
+                    jjsongz_id = str(jsongz_id).zfill(2)
+                    jsongz_record_path = os.path.join(lang_dir, f"{lang}-{jjsongz_id}.offset")
+                    with open(jsongz_record_path, 'r') as fp:
+                        total_lines_in_jsongz = len(fp.readlines()) - 1 # extra lines per file 
+                        # record all possible id in the json 
+                        for doc_id in range(total_lines_in_jsongz): 
+                            ddoc_id = str(doc_id).zfill(5)
+                            self.encode_data.append(f"clueweb22-en-{jjsongz_id}-{ddoc_id}")
+                            
         logger.info(f"EncodeDataset_MARCOWeb total length: {len(self.encode_data)}")
 
         if self.data_args.dataset_number_of_shards > 1:
@@ -387,13 +396,13 @@ class EncodeDataset_MARCOWeb(Dataset):
 
     def __getitem__(self, item) -> Tuple[str, str]:
 
-        # TODO: query processing 
         if self.data_args.encode_is_query:
+            # query processing
             text = self.encode_data[item]
             text_id = text["query_id"]
             formated_text = format_query(text["query"], self.data_args.query_prefix)
         else:
-            
+            # document processing 
             cweb_doc_id = self.encode_data[item]
             clueweb_api = ClueWeb22Api(cweb_doc_id, self.dataset_dir)
 
