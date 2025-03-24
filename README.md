@@ -46,3 +46,34 @@ Some paths are currently hard-coded within the files.
 Also works with huggingface datasets out-of-the-box if in Tevatron format. For example:
 - [Corpus](https://huggingface.co/datasets/Tevatron/msmarco-passage-corpus)
 - [Queries](https://huggingface.co/datasets/Tevatron/msmarco-passage)
+
+
+
+## Memory-SSD Hybrid Retrieval: DiskANN 
+
+DiskANN should be installed according to the instructions in the [official DiskANN opensource repository](https://github.com/microsoft/DiskANN/tree/main). 
+
+
+### Data Preparation Helpers
+
+The inputs and outputs of DiskANN follows the [DiskANN documentation](https://github.com/microsoft/DiskANN/blob/main/workflows/SSD_index.md). 
+
+#### Dcoument embeddings 
+
+`diskann/utils.py: convert_encoded_pkl_to_binary()`: convert the pickle-packed file (an output file from the above inference section) containing a (embeds. docids) tuple into a binary embedding file following DiskANN format and a separated pickle file for the document ids. 
+
+`diskann/utils.py: convert_encoded_pkls_to_binary()`: convert a list of pickle-packed files (output shards from the above inference section) each containing a (embeds. docids) tuple into a single binary embedding file following DiskANN format and a separated pickle file for the document ids. 
+
+`diskann/utils.py: read_fbin()`: read a binary embedding file in DiskANN format 
+
+#### KNNS truth
+
+Modify the parameters with `#TODO` tags in `diskann/scripts/utils.sh` and run: 
+`sbatch diskann/scripts/utils.sh`
+
+`diskann/utils.py: retrieval_result_read()`: read the grouth truth file in DiskANN format 
+
+
+### Index Build and Search
+Modify the parameters with `#TODO` tags in `diskann/scripts/build_and_search.sh` and run: 
+`sbatch diskann/scripts/build_and_search.sh`
