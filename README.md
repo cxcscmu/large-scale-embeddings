@@ -58,20 +58,35 @@ DiskANN should be installed according to the instructions in the [official DiskA
 
 The inputs and outputs of DiskANN follows the [DiskANN documentation](https://github.com/microsoft/DiskANN/blob/main/workflows/SSD_index.md). 
 
-#### Dcoument embeddings 
+#### Document embeddings 
 
 `diskann/utils.py: convert_encoded_pkl_to_binary()`: convert the pickle-packed file (an output file from the above inference section) containing a (embeds. docids) tuple into a binary embedding file following DiskANN format and a separated pickle file for the document ids. 
 
 `diskann/utils.py: convert_encoded_pkls_to_binary()`: convert a list of pickle-packed files (output shards from the above inference section) each containing a (embeds. docids) tuple into a single binary embedding file following DiskANN format and a separated pickle file for the document ids. 
 
-`diskann/utils.py: read_fbin()`: read a binary embedding file in DiskANN format 
+`diskann/utils.py: read_fbin()`: read a binary embedding file in DiskANN format. 
 
-#### KNNS truth
+`diskann/utils.py: write_embed_to_binary()`: write an embedding array to a binary embedding file in DiskANN format. 
+
+
+#### Groud Truth
+
+`diskann/utils.py: retrieval_result_read()`: read the grouth truth file in DiskANN format, the e2e option specify whether a distance array will be read (ANNS scenario) or not (end-to-end qrel scenario). 
+
+##### ANNS Truth
 
 Modify the parameters with `#TODO` tags in `diskann/scripts/utils.sh` and run: 
 `sbatch diskann/scripts/utils.sh`
 
-`diskann/utils.py: retrieval_result_read()`: read the grouth truth file in DiskANN format 
+##### End-to-End Truth
+
+`diskann/utils.py: read_trec_qrels()`: read a trec_eval formatted qrel file and return a dictionary of qids and their corresponding qrels. 
+
+`diskann/utils.py: write_qrels_to_binary()`: write a dictionary of qids and their corresponding qrels into a binary ground truth file supported by DiskANN.
+
+
+
+
 
 
 ### Index Build and Search
