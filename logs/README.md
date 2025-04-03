@@ -1,1 +1,0 @@
-slurm log folder. keeping this file here to get the folder automatically and avoid silent slurm errors.
