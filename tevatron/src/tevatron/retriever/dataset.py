@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from huggingface_hub import login
 
 from tevatron.retriever.arguments import DataArguments
-from tevatron.utils.ClueWeb22Api import ClueWeb22Api, create_shards
+from tevatron.utils.ClueWeb22Api import ClueWeb22Api, MARCOWebClueWeb22Api, create_shards
 
 from transformers import BatchEncoding
 
@@ -378,7 +378,7 @@ class EncodeDataset_MARCOWeb(Dataset):
                         # record all possible id in the json 
                         for doc_id in range(total_lines_in_jsongz): 
                             ddoc_id = str(doc_id).zfill(5)
-                            self.encode_data.append(f"clueweb22-en-{jjsongz_id}-{ddoc_id}")
+                            self.encode_data.append(f"clueweb22-{lang}-{jjsongz_id}-{ddoc_id}")
                             
         logger.info(f"EncodeDataset_MARCOWeb total length: {len(self.encode_data)}")
 
@@ -404,9 +404,93 @@ class EncodeDataset_MARCOWeb(Dataset):
         else:
             # document processing 
             cweb_doc_id = self.encode_data[item]
-            clueweb_api = ClueWeb22Api(cweb_doc_id, self.dataset_dir)
+            clueweb_api = MARCOWebClueWeb22Api(cweb_doc_id, self.dataset_dir)
 
             clean_txt = eval(clueweb_api.get_marcoweb_clean_text())
+            text_id = clean_txt["ClueWeb22-ID"]
+            content = clean_txt["Clean-Text"]
+            title = content.split('\n')[0].replace("\n", "").replace("\t", "").replace("\r", "").replace("\'", "").replace("\"", "").strip()
+            content = content.replace("\n", "").replace("\t", "").replace("\r", "").replace("\'", "").replace("\"", "").strip()
+                
+            formated_text = format_passage(
+                content,
+                title,
+                self.data_args.passage_prefix,
+                self.data_args.add_markers,
+            )
+
+        return text_id, formated_text
+
+
+
+class EncodeDataset_ClueWeb22(Dataset):
+
+    def __init__(self, data_args: DataArguments):
+        self.data_args = data_args
+
+        # simply record all possible lines and the corresponding cwid 
+        self.dataset_dir = self.data_args.dataset_path
+
+        self.encode_data = []
+        if self.data_args.encode_is_query:
+            # query: directly read csv 
+            data = pd.read_csv(self.data_args.dataset_path, sep='\t', header=None)
+            self.encode_data = [
+                {'query_id': qid, "query": query} for qid, query in zip(list(data.iloc[:, 0]), list(data.iloc[:, 1]))
+            ]
+        else: 
+
+            # selected languages to encode (eg. de)
+            for lang in self.data_args.langs: 
+                lang_dir = os.path.join(self.dataset_dir, "txt", lang)
+
+                # folders under each language (eg. de00) 
+                for lang_subfolder in os.listdir(lang_dir): 
+                    lang_subfolder_dir = os.path.join(lang_dir, lang_subfolder)
+
+                    # subfolders under each language shard (eg. de0000)
+                    for subfolder in os.listdir(lang_subfolder_dir): 
+
+                        subfolder_dir = os.path.join(lang_subfolder_dir, subfolder)
+                        # each json shard: .json.gz, .json.gz.checksum, .offset, .offset.checksum
+                        num_json_shards = len(os.listdir(subfolder_dir)) // 4
+
+                        for jsongz_id in range(0, num_json_shards):
+                            jjsongz_id = str(jsongz_id).zfill(2)
+                            jsongz_record_path = os.path.join(subfolder_dir, f"{subfolder}-{jjsongz_id}.offset")
+                            with open(jsongz_record_path, 'r') as fp:
+                                total_lines_in_jsongz = len(fp.readlines()) - 1 # extra lines per file 
+                                # record all possible id in the json 
+                                for doc_id in range(total_lines_in_jsongz): 
+                                    ddoc_id = str(doc_id).zfill(5)
+                                    self.encode_data.append(f"clueweb22-{subfolder}-{jjsongz_id}-{ddoc_id}")
+                            
+        logger.info(f"EncodeDataset_ClueWeb22 total length: {len(self.encode_data)}")
+ 
+        if self.data_args.dataset_number_of_shards > 1:
+            self.encode_data = create_shards(
+                data=self.encode_data, 
+                num_shards=self.data_args.dataset_number_of_shards, 
+                index=self.data_args.dataset_shard_index
+            )
+        logger.info(f"EncodeDataset_ClueWeb22 shard {self.data_args.dataset_shard_index} length: {len(self.encode_data)}")
+
+    def __len__(self):
+        return len(self.encode_data)
+
+    def __getitem__(self, item) -> Tuple[str, str]:
+
+        if self.data_args.encode_is_query:
+            # query processing
+            text = self.encode_data[item]
+            text_id = text["query_id"]
+            formated_text = format_query(text["query"], self.data_args.query_prefix)
+        else:
+            # document processing 
+            cweb_doc_id = self.encode_data[item]
+            clueweb_api = ClueWeb22Api(cweb_doc_id, self.dataset_dir)
+
+            clean_txt = eval(clueweb_api.get_clean_text())
             text_id = clean_txt["ClueWeb22-ID"]
             content = clean_txt["Clean-Text"]
             title = content.split('\n')[0].replace("\n", "").replace("\t", "").replace("\r", "").replace("\'", "").replace("\"", "").strip()
