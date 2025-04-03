@@ -18,7 +18,7 @@ from transformers import (
 from tevatron.retriever.arguments import ModelArguments, \
     TevatronDataArguments as DataArguments, \
     TevatronTrainingArguments as TrainingArguments
-from tevatron.retriever.dataset import EncodeDataset, EncodeDataset_MARCOWeb
+from tevatron.retriever.dataset import EncodeDataset, EncodeDataset_MARCOWeb, EncodeDataset_ClueWeb22
 from tevatron.retriever.collator import EncodeCollator
 from tevatron.retriever.modeling import EncoderOutput, DenseModel
 
@@ -71,6 +71,8 @@ def main():
     )
 
     if data_args.clueweb_api_dataset: 
+        dataset_obj = EncodeDataset_ClueWeb22
+    elif data_args.marcoweb_api_dataset: 
         dataset_obj = EncodeDataset_MARCOWeb
     else: 
         dataset_obj = EncodeDataset
