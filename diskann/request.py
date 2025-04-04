@@ -2,8 +2,7 @@ import requests
 import numpy as np
 import time
 import threading
-
-lock = threading.Lock()
+from concurrent.futures import ThreadPoolExecutor
 
 # URL = "http://10.1.1.26:8008"
 K = 10
@@ -58,15 +57,17 @@ def rerank(I, D):
     return I, D
 
 
-def request_shard(shard, indices, distances, i):
+def request_shard(shard, jsonquery):
     # print(f"shard: {shard}")
     url = f"http://{HOST[shard]}:{PORT}"
     # print(f"URL: {url}")
-    response = requests.post(url, json=jsonquery).json()
-    # print(response)
-    with lock:
-        indices[i] = response["indices"]
-        distances[i] = response["distances"]
+    try:
+        response = requests.post(url, json=jsonquery)
+        response_dict = response.json()
+    except Exception as e:
+        print(response)
+        raise e
+    return response_dict["indices"], response_dict["distances"]
     # print(f"shard {shard} finished")
 
 
@@ -88,15 +89,14 @@ for query_id in range(queries.shape[0]):
         "query": queries[0].tolist(),
         "k": K,
     }
-    indices = [None] * len(SHARDS)
-    distances = [None] * len(SHARDS)
-    threads = []
-    for i, shard in enumerate(SHARDS):
-        thread = threading.Thread(target=request_shard, args=(shard, indices, distances, i))
-        threads.append(thread)
-        thread.start()
-    for thread in threads:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
+        futures = [executor.submit(request_shard, shard, jsonquery) for shard in SHARDS]
+        results = [future.result() for future in futures]
+    indices = []
+    distances = []
+    for result in results:
+        indices.extend(result[0])
+        distances.extend(result[1])
     I = np.array(indices).reshape(1, -1) + OFFSET_ARRAY
     D = np.array(distances).reshape(1, -1)
     I, D = rerank(I, D)
