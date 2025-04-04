@@ -84,7 +84,6 @@ OFFSET_ARRAY = np.array(OFFSET_ARRAY)
 
 N_TEST = 500
 queries = read_fbin(QUERY_FILE)[:N_TEST]
-start_time = time.perf_counter()
 indices = {}
 distances = {}
 futures = []
@@ -121,12 +120,11 @@ time2 = time.perf_counter()
 
 io_time = time1 - time0
 compute_time = time2 - time1
-end_time = time.perf_counter()
-total_time = end_time - start_time
-average_time = (end_time - start_time) / N_TEST
+total_time = time2 - time0
+average_time = total_time / N_TEST
 qps = 1 / average_time
-print(f"Total time: {total_time} seconds")
-print(f"QPS: {qps}")
-print(f"Average time per query: {average_time} seconds")
-print(f"IO time: {io_time} seconds ({io_time / total_time * 100:.2f}%)")
-print(f"Compute time: {compute_time} seconds ({compute_time / total_time * 100:.2f}%)")
+print(f"Total time: {total_time:4f} seconds")
+print(f"QPS: {qps:4f}")
+print(f"Average time per query: {average_time:4f} seconds")
+print(f"IO time: {io_time:4f} seconds ({io_time / total_time * 100:.2f}%)")
+print(f"Compute time: {compute_time:4f} seconds ({compute_time / total_time * 100:.2f}%)")
