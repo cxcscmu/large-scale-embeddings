@@ -1,6 +1,7 @@
 import requests
 import numpy as np
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # URL = "http://10.1.1.26:8008"
@@ -63,10 +64,15 @@ def request_shard(shard, jsonquery):
     try:
         response = requests.post(url, json=jsonquery)
         response_dict = response.json()
-    except Exception as e:
-        print(response)
-        raise e
-    return response_dict["indices"], response_dict["distances"]
+    except requests.exceptions.JSONDecodeError as e:
+        response_text = response.text
+        if "inf" in response_text:
+            print(f"Response contains 'inf': {response_text}")
+            response_dict = json.loads(response_text.replace("inf", '"inf"'))
+        else:
+            print(f"Error decoding JSON: {response_text}")
+            raise e
+    return jsonquery["query_id"], response_dict["indices"], response_dict["distances"]
     # print(f"shard {shard} finished")
 
 
