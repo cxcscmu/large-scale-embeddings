@@ -1,8 +1,7 @@
 import requests
 import numpy as np
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # URL = "http://10.1.1.26:8008"
 K = 10
@@ -92,15 +91,15 @@ for query_id in range(queries.shape[0]):
         "query": queries[0].tolist(),
         "k": K,
     }
-    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
-        futures = [executor.submit(request_shard, shard, jsonquery) for shard in SHARDS]
-        results = [future.result() for future in futures]
-    time1 = time.perf_counter()
     indices = []
     distances = []
-    for result in results:
-        indices.extend(result[0])
-        distances.extend(result[1])
+    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
+        futures = [executor.submit(request_shard, shard, jsonquery) for shard in SHARDS]
+        for future in as_completed(futures):
+            result = future.result()
+            indices.extend(result[0])
+            distances.extend(result[1])
+    time1 = time.perf_counter()
     I = np.array(indices).reshape(1, -1) + OFFSET_ARRAY
     D = np.array(distances).reshape(1, -1)
     I, D = rerank(I, D)
