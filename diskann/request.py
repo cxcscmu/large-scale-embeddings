@@ -76,38 +76,45 @@ for shard in SHARDS:
 OFFSET_ARRAY = np.array(OFFSET_ARRAY)
 # print(f"OFFSET_ARRAY: {OFFSET_ARRAY.shape}")
 
-io_time = 0
-compute_time = 0
-
-N_TEST = 100
+N_TEST = 500
 queries = read_fbin(QUERY_FILE)[:N_TEST]
 start_time = time.perf_counter()
+indices = {}
+distances = {}
+futures = []
+time0 = time.perf_counter()
+with ThreadPoolExecutor(max_workers=50) as executor:
+    for query_id in range(queries.shape[0]):
+        query = queries[query_id]
+        jsonquery = {
+            "Ls": Ls,
+            "query_id": query_id,
+            "query": queries[0].tolist(),
+            "k": K,
+        }
+        indices[query_id] = []
+        distances[query_id] = []
+        futures.extend([executor.submit(request_shard, shard, jsonquery) for shard in SHARDS])
+
+    for future in as_completed(futures):
+        result = future.result()
+        query_id = result[0]
+        indices[query_id].extend(result[1])
+        distances[query_id].extend(result[2])
+
+
+time1 = time.perf_counter()
+
 for query_id in range(queries.shape[0]):
-    time0 = time.perf_counter()
-    query = queries[query_id]
-    jsonquery = {
-        "Ls": Ls,
-        "query_id": query_id,
-        "query": queries[0].tolist(),
-        "k": K,
-    }
-    indices = []
-    distances = []
-    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
-        futures = [executor.submit(request_shard, shard, jsonquery) for shard in SHARDS]
-        for future in as_completed(futures):
-            result = future.result()
-            indices.extend(result[0])
-            distances.extend(result[1])
-    time1 = time.perf_counter()
-    I = np.array(indices).reshape(1, -1) + OFFSET_ARRAY
-    D = np.array(distances).reshape(1, -1)
+    assert len(indices[query_id]) == K * len(SHARDS)
+    I = np.array(indices[query_id]).reshape(1, -1) + OFFSET_ARRAY
+    D = np.array(distances[query_id]).reshape(1, -1)
     I, D = rerank(I, D)
-    time2 = time.perf_counter()
-    io_time += time1 - time0
-    compute_time += time2 - time1
 
+time2 = time.perf_counter()
 
+io_time = time1 - time0
+compute_time = time2 - time1
 end_time = time.perf_counter()
 total_time = end_time - start_time
 average_time = (end_time - start_time) / N_TEST
