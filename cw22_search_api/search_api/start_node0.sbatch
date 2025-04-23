@@ -5,7 +5,7 @@
 #SBATCH --mem=32G
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=1
-#SBATCH --time=24:00:00
+#SBATCH --time=999:00:00
 #SBATCH --output=node_log/search_node_0.log
 #SBATCH --error=node_log/search_node_0.err
 
