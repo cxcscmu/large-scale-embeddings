@@ -5,11 +5,12 @@ import numpy as np
 import pickle
 import random
 import string
+import random
+
 from utils.cw22_files import ClueWeb22Docs
 from utils.query_encoder import QueryEncoder
 from collections import Counter
-
-from relevance_judgement.relevance_metric import RMetric
+# from relevance_judgement.relevance_metric import RMetric
 
 
 class ClueWeb22Searcher:
@@ -61,6 +62,9 @@ class ClueWeb22Searcher:
         self.query_emb_dir = "/bos/usr0/jening/search_service/query_embeddings/"
         self.query_counter = 0
 
+        self.session_id = random.randint(1, 2147483647)
+        print(f"---ClueWeb22Searcher Init Step 4: Search session id {self.session_id}---")
+
         # Track distribution of results across shards
         self.shard_distribution = Counter()
 
@@ -89,7 +93,7 @@ class ClueWeb22Searcher:
         self.query_counter += 1
 
         # Save query embedding to be used by the distributed search servers
-        np.save(file=self.query_emb_dir + f"q_emb_{qid}.npy",
+        np.save(file=self.query_emb_dir + f"q_emb_{self.session_id}_{qid}.npy",
                 arr=q_emb)
         return qid
 
@@ -132,7 +136,7 @@ class ClueWeb22Searcher:
 
             # Construct request URL and fetch results from this shard
             url = self.distributed_indices[shard_id]
-            request_url = url + f"q_emb=q_emb_{qid}.npy&k={k}"
+            request_url = url + f"q_emb=q_emb_{self.session_id}_{qid}.npy&k={k}"
             response = requests.get(request_url)
             
             if response.status_code == 200:
@@ -180,12 +184,12 @@ class ClueWeb22Searcher:
             list: Document texts corresponding to the given IDs
         """
         doc_texts = list()
-        self.verbose_print("\n----------------Retrieved Texts----------------")
+        self._verbose_print("\n----------------Retrieved Texts----------------")
         for docid in docids:
             doc_text = self.cw2_docs.get_txt(docid)
-            self.verbose_print("\n------------------------------------------------")
-            self.verbose_print(docid)
-            self.verbose_print(doc_text)
+            self._verbose_print("\n------------------------------------------------")
+            self._verbose_print(docid)
+            self._verbose_print(doc_text)
             doc_texts.append(doc_text)
 
         return doc_texts
