@@ -52,7 +52,7 @@ class QueryEncoder:
         self.model.to(self.device)
 
         # Default instruction/prompt for query encoding
-        self.instruction = "Query: "
+        self.instruction = "Instruction: Given a web search query, retrieve relevant passages that answer the query. Query: "
 
         print(f"Model '{model_name}' loaded successfully")
 

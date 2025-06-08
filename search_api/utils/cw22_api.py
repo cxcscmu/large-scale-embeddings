@@ -163,7 +163,7 @@ class ClueWeb22Api:
                 end_bytes = int(f_offset.read(offset_length).strip())
                 f_json.seek(start_bytes)
                 record = f_json.read(end_bytes - start_bytes)
-                record = gzip.decompress(record).decode('utf-8')
+                record = gzip.decompress(record)
                 return record
 
     def get_clean_text(self):

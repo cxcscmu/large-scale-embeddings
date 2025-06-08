@@ -1,13 +1,13 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import JSONResponse
+import logging
+import socket
+from contextlib import asynccontextmanager
+from typing import List
+
 import numpy as np
 import uvicorn
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
 from diskannpy import StaticDiskIndex
-from contextlib import asynccontextmanager
-import socket
-import logging
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +18,6 @@ loaded_index = None
 embeddings = None
 qid_mapping = dict()
 index_dir = "/ssd1/cw22_ann_index/cw22_b_en/R80L120-2"
-embedding_dir = "/bos/usr0/jening/search_service/query_embeddings/"
 
 
 def get_ip_address():
@@ -63,7 +62,7 @@ def init_index():
         raise
 
 
-def query_index(q_emb: str, k: int = 10) -> tuple:
+def query_index(q_emb: np.ndarray, k: int = 10, complexity: int = 50) -> tuple:
     """
     Query the vector index with the given embedding file
 
@@ -75,17 +74,12 @@ def query_index(q_emb: str, k: int = 10) -> tuple:
         Tuple of (raw_doc_ids, distances)
     """
     global loaded_index
-    global embedding_dir
 
     try:
-        # Load the embedding from file
-        cur_embedding = np.load(embedding_dir + q_emb)
-        logger.debug(f"Embedding shape: {cur_embedding.shape}")
-
         # Search the index
-        raw_doc_ids, distances = loaded_index.search(query=cur_embedding,
+        raw_doc_ids, distances = loaded_index.search(query=q_emb,
                                                      k_neighbors=k,
-                                                     complexity=k * 5,
+                                                     complexity=complexity,
                                                      beam_width=10)
 
         logger.debug(f"Labels: {raw_doc_ids.tolist()}")
@@ -96,9 +90,16 @@ def query_index(q_emb: str, k: int = 10) -> tuple:
         raise
 
 
+# Request and response models
+class SearchRequest(BaseModel):
+    q_emb: List[float]
+    k: int
+    complexity: int
+
+
 # Response model for type hints and documentation
 class SearchResponse(BaseModel):
-    raw_doc_ids: List[int]
+    indices: List[int]
     distances: List[float]
 
 
@@ -129,8 +130,8 @@ app = FastAPI(
 )
 
 
-@app.get("/search", response_model=SearchResponse)
-async def search(q_emb: str, k: int):
+@app.post("/search", response_model=SearchResponse)
+async def search(request: SearchRequest):
     """
     Search endpoint that returns nearest neighbors for a given query embedding
 
@@ -142,8 +143,10 @@ async def search(q_emb: str, k: int):
         JSON with raw document IDs and distances
     """
     try:
-        raw_doc_ids, distances = query_index(q_emb, k)
-        return {"raw_doc_ids": raw_doc_ids, "distances": distances}
+        q_emb = np.array(request.q_emb, dtype=np.float32)
+        
+        raw_doc_ids, distances = query_index(q_emb, request.k, request.complexity)
+        return {"indices": raw_doc_ids, "distances": distances}
     except Exception as e:
         logger.error(f"Error in search endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
