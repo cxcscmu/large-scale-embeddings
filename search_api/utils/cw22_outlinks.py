@@ -4,16 +4,16 @@ import re
 import json
 
 
-class ClueWeb22Docs:
+class ClueWeb22Outlinks:
     """
-    Fetch ClueWeb22 documents. Currently only supports the txt file
+    Fetch ClueWeb22 documents. Currently only supports the outlink file
     hierarchy. Upgrading too support the html (warc.gz) hierarchy
     would be easy.
 
     Usage:
         cw22_docs('/bos/tmp1/ClueWeb22_L')
 
-    	.get_txt('clueweb22-en0102-03-00004')
+    	.get_outlink('clueweb22-en0102-03-00004')
     """
 
     # ------------------ Global variables ---------------------- #
@@ -38,7 +38,7 @@ class ClueWeb22Docs:
         """
 
         # Location of ClueWeb22 files.
-        self.cw22_dir_txt = os.path.join(cw22_dir_root, 'txt')
+        self.cw22_dir_outlink = os.path.join(cw22_dir_root, 'outlink')
 
         # Files do not close after a read in case the next lookup is
         # from the same files. These variables describe the open files.
@@ -82,7 +82,7 @@ class ClueWeb22Docs:
                 self._fptr_offset.close()
 
             # Open the right files
-            path = os.path.join(self.cw22_dir_txt, lang, stream, subdir,
+            path = os.path.join(self.cw22_dir_outlink, lang, stream, subdir,
                                 f'{subdir}-{file_seq}')
             self._fptr_json = open(f'{path}.json.gz', 'rb')
             self._fptr_offset = open(f'{path}.offset', 'rb')
@@ -91,11 +91,11 @@ class ClueWeb22Docs:
 
         return ((self._fptr_offset, self._fptr_json))
 
-    def get_txt(self, docid):
-        """Get the txt representation of a ClueWeb22 document"""
+    def get_outlink(self, docid):
+        """Get the outlink representation of a ClueWeb22 document"""
 
         # Parse the ClueWeb22 docid
-        matches = ClueWeb22Docs.cwid_regex.search(docid)
+        matches = ClueWeb22Outlinks.cwid_regex.search(docid)
         lang, stream, subdir, file_seq, doc_seq = matches.group(3, 2, 1, 6, 7)
 
         # Open the .offset and .json.gz files if they are not open already
@@ -112,7 +112,7 @@ class ClueWeb22Docs:
 
     def enumerate_doc_ids(self):
         # Base directory for en00 subdirectories
-        base_dir = os.path.join(self.cw22_dir_txt, 'en', 'en00')
+        base_dir = os.path.join(self.cw22_dir_outlink, 'en', 'en00')
 
         # Pattern for offset files (like en0000-31.offset)
         file_pattern = re.compile(r'(en\d{4})-(\d{2})\.offset')
@@ -173,7 +173,7 @@ class ClueWeb22Docs:
 
 # if __name__ == "__main__":
 #     # Print the first 10 document IDs as an example
-#     cw2_docs = ClueWeb22Docs()
+#     cw2_docs = ClueWeb22Outlinks()
 #     last_id = None
 #     prev_partition_id = None
 #     cnt = 0
@@ -197,10 +197,10 @@ class ClueWeb22Docs:
 #                "clueweb22-en0041-84-02366",
 #                "clueweb22-en0038-21-02172",
 #                "clueweb22-en0040-20-05288"]
-#     cw2_docs = ClueWeb22Docs()
+#     cw2_docs = ClueWeb22Outlinks()
 #
 #     for docid in doc_ids:
-#         doc_text = cw2_docs.get_txt(docid)
+#         doc_text = cw2_docs.get_outlink(docid)
 #         print("-------------------------------------------")
 #         print(docid)
 #         print(doc_text)
