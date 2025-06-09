@@ -1,26 +1,14 @@
 import base64
-import logging
-import random
 import socket
-import csv
-import os
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
 
 import uvicorn
-from fastapi import FastAPI, Query, Depends, HTTPException, Header, Request
-from pydantic import BaseModel
-from tqdm import tqdm
-
-from cw22_searcher import ClueWeb22Searcher
-from fw_searcher import FineWebSearcher
-
-from utils.cw22_api import ClueWeb22Api
+from fastapi import FastAPI, Query, HTTPException, Header, Request
 
 from auth.auth_db import *
-from sqlite_db.search_logger import init_search_logger, log_search_async
-
+from cw22_searcher import ClueWeb22Searcher
 from fw_searcher import FineWebSearcher
+from sqlite_db.search_logger import init_search_logger, log_search_async
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Global variables
 cw22_searcher = None
 fw_searcher = None
+
 
 def get_ip_address():
     """
@@ -65,14 +54,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("Initializing auth db...")
     init_auth()
-    
+
     logger.info("Initializing search logger...")
     init_search_logger()
-    
+
     logger.info("Initializing ClueWeb22 searcher...")
     cw22_searcher = ClueWeb22Searcher(verbose=False)
     fw_searcher = FineWebSearcher(verbose=False)
-    
+
     # Display service information with actual IP
     ip_address = get_ip_address()
     port = 51000
@@ -94,13 +83,6 @@ app = FastAPI(
 )
 
 
-def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    """Verify the API key from the X-API-Key header"""
-    if not verify_api_key_exists(x_api_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
-    return True
-
-
 @app.get("/search")
 async def search(
         request: Request,
@@ -110,7 +92,7 @@ async def search(
         num_of_shards: Optional[int] = Query(4, description="Number of shards to use for search"),
         with_distance: Optional[bool] = Query(False, description="Whether with document distance"),
         with_outlink: Optional[bool] = Query(False, description="Whether with document outlink"),
-        api_key_valid: bool = Depends(verify_api_key)
+        x_api_key: Optional[str] = Header(None)
 ):
     """
     Search endpoint that returns document results for a given query
@@ -142,9 +124,18 @@ async def search(
             detail=f"Invalid num_of_shards: {num_of_shards}. Value must be between 1 and 4."
         )
 
-    # Log search request asynchronously
+    # Log search request
     client_ip = request.client.host
-    log_search_async(client_ip, query, k, complexity, num_of_shards, with_distance, with_outlink, 'clueweb22')
+    x_api_key = x_api_key or ''
+    verify_result = verify_api_key_exists(x_api_key)
+
+    # Log search request with actual verification result
+    log_search_async(client_ip, query, k, complexity, num_of_shards,
+                     with_distance, with_outlink, 'clueweb22', x_api_key, verify_result)
+
+    # Return 401 if verification failed
+    if not verify_result:
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
     logger.info(f"Search query: {query}, k={k}, complexity={complexity}, num_of_shards={num_of_shards}")
 
@@ -153,7 +144,7 @@ async def search(
 
         # Perform the actual search with num_of_shards parameter
         docs = cw22_searcher.search(query, k=k, complexity=complexity, num_of_shards=num_of_shards,
-                               with_distance=with_distance)
+                                    with_distance=with_distance)
 
         distances = None
         if with_distance:
@@ -220,7 +211,8 @@ async def fineweb_search(
 
     # Log search request asynchronously
     client_ip = request.client.host
-    log_search_async(client_ip, query, k, complexity, num_of_shards, with_distance, False, 'fineweb')
+    log_search_async(client_ip, query, k, complexity, num_of_shards,
+                     with_distance, False, 'fineweb', "", True)
 
     logger.info(f"Search query: {query}, k={k}, complexity={complexity}, num_of_shards={num_of_shards}")
 
@@ -229,7 +221,7 @@ async def fineweb_search(
 
         # Perform the actual search with num_of_shards parameter
         docs = fw_searcher.search(query, k=k, complexity=complexity, num_of_shards=num_of_shards,
-                               with_distance=with_distance)
+                                  with_distance=with_distance)
 
         distances = None
         if with_distance:
