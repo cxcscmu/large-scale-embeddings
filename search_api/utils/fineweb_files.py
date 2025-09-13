@@ -2,12 +2,13 @@ import os
 import lmdb
 import pickle
 import time
+import threading
 from typing import Optional, Dict, List, Tuple
 
 
 class FineWebDocs:
     """
-    Class for retrieving document text from sharded LMDB database.
+    Thread-safe class for retrieving document text from sharded LMDB database.
     
     Loads the docid_to_shard mapping and provides efficient access to
     document text across multiple LMDB shards.
@@ -17,22 +18,20 @@ class FineWebDocs:
         text = doc_manager.get_txt("document_id")
     """
     
-    def __init__(self, base_dir: str, readonly: bool = True, preload_shards: bool = False, 
-                max_readers: int = 256, max_cached_envs: int = 10):
+    def __init__(self, base_dir: str, readonly: bool = True, preload_shards: bool = True, 
+                max_readers: int = 256):
         """
         Initialize the FineWebDocs class.
         
         Args:
             base_dir: Base directory containing LMDB shards and docid_to_shard.pkl
             readonly: Whether to open LMDB environments in readonly mode
-            preload_shards: Whether to preload all shard environments (memory intensive)
+            preload_shards: Whether to preload all shard environments (recommended as True)
             max_readers: Maximum number of reader slots per environment
-            max_cached_envs: Maximum number of environments to keep open if not preloading
         """
         self.base_dir = base_dir
         self.readonly = readonly
         self.max_readers = max_readers
-        self.max_cached_envs = max_cached_envs
         
         # Load docid to shard mapping
         self.docid_to_shard = self._load_mapping()
@@ -40,21 +39,22 @@ class FineWebDocs:
         # Get the number of shards from metadata or directory structure
         self.num_shards = self._get_num_shards()
         
-        # LMDB environments - either all or cached
+        # LMDB environments - shared across threads
         self.envs = {}
-        self.transactions = {}
+        self.env_lock = threading.Lock()  # Protect environment operations
         
-        # Usage statistics for LRU cache
-        self.env_last_used = {}
+        # Thread-local storage for transactions
+        self.thread_local = threading.local()
         
-        # Preload environments if requested
+        # Preload environments (default to True for better performance)
         if preload_shards:
             self._preload_environments()
             
-        # Performance tracking
+        # Performance tracking (thread-safe)
         self.hit_count = 0
         self.miss_count = 0
         self.access_count = 0
+        self.stats_lock = threading.Lock()
         self.start_time = time.time()
     
     def _load_mapping(self) -> Dict[str, int]:
@@ -102,11 +102,39 @@ class FineWebDocs:
         raise ValueError("Could not determine the number of shards")
     
     def _preload_environments(self):
-        """Preload all LMDB environments - memory intensive but faster access."""
+        """Preload all LMDB environments for better performance."""
         print(f"Preloading {self.num_shards} LMDB environments...")
-        for shard_id in range(self.num_shards):
-            shard_path = os.path.join(self.base_dir, f"shard_{shard_id:03d}")
-            if os.path.isdir(shard_path):
+        with self.env_lock:
+            for shard_id in range(self.num_shards):
+                shard_path = os.path.join(self.base_dir, f"shard_{shard_id:03d}")
+                if os.path.isdir(shard_path):
+                    try:
+                        env = lmdb.open(
+                            shard_path,
+                            readonly=self.readonly,
+                            lock=False,
+                            readahead=False,
+                            max_readers=self.max_readers
+                        )
+                        self.envs[shard_id] = env
+                    except Exception as e:
+                        print(f"Warning: Failed to preload shard {shard_id}: {e}")
+        
+        print(f"Preloaded {len(self.envs)} environments")
+    
+    def _get_thread_transactions(self) -> Dict[int, lmdb.Transaction]:
+        """Get thread-local transaction dictionary."""
+        if not hasattr(self.thread_local, 'transactions'):
+            self.thread_local.transactions = {}
+        return self.thread_local.transactions
+    
+    def _get_environment(self, shard_id: int) -> Tuple[lmdb.Environment, lmdb.Transaction]:
+        """Get or create LMDB environment and thread-local transaction for the specified shard."""
+        # Get or open environment
+        with self.env_lock:
+            if shard_id not in self.envs:
+                # Open the environment on demand
+                shard_path = os.path.join(self.base_dir, f"shard_{shard_id:03d}")
                 try:
                     env = lmdb.open(
                         shard_path,
@@ -116,64 +144,17 @@ class FineWebDocs:
                         max_readers=self.max_readers
                     )
                     self.envs[shard_id] = env
-                    # Create and keep a transaction open for faster access
-                    self.transactions[shard_id] = env.begin()
-                    self.env_last_used[shard_id] = time.time()
                 except Exception as e:
-                    print(f"Warning: Failed to preload shard {shard_id}: {e}")
-        
-        print(f"Preloaded {len(self.envs)} environments")
-    
-    def _get_environment(self, shard_id: int) -> Tuple[lmdb.Environment, lmdb.Transaction]:
-        """Get or create LMDB environment and transaction for the specified shard."""
-        # Return cached environment if available
-        if shard_id in self.envs:
-            self.env_last_used[shard_id] = time.time()
-            return self.envs[shard_id], self.transactions.get(shard_id)
-        
-        # Check if we need to close least recently used environments
-        if len(self.envs) >= self.max_cached_envs:
-            self._close_least_used_env()
-        
-        # Open the environment
-        shard_path = os.path.join(self.base_dir, f"shard_{shard_id:03d}")
-        try:
-            env = lmdb.open(
-                shard_path,
-                readonly=self.readonly,
-                lock=False,
-                readahead=False,
-                max_readers=self.max_readers
-            )
+                    raise RuntimeError(f"Failed to open shard {shard_id}: {e}")
             
-            # Store in cache
-            self.envs[shard_id] = env
-            txn = env.begin()
-            self.transactions[shard_id] = txn
-            self.env_last_used[shard_id] = time.time()
-            
-            return env, txn
-        except Exception as e:
-            raise RuntimeError(f"Failed to open shard {shard_id}: {e}")
-    
-    def _close_least_used_env(self):
-        """Close the least recently used environment to manage memory usage."""
-        if not self.env_last_used:
-            return
+            env = self.envs[shard_id]
         
-        # Find least recently used
-        lru_shard = min(self.env_last_used.items(), key=lambda x: x[1])[0]
+        # Get or create thread-local transaction
+        transactions = self._get_thread_transactions()
+        if shard_id not in transactions:
+            transactions[shard_id] = env.begin()
         
-        # Close the transaction and environment
-        if lru_shard in self.transactions:
-            self.transactions[lru_shard].abort()
-            del self.transactions[lru_shard]
-        
-        if lru_shard in self.envs:
-            self.envs[lru_shard].close()
-            del self.envs[lru_shard]
-        
-        del self.env_last_used[lru_shard]
+        return env, transactions[shard_id]
     
     def get_txt(self, doc_id: str) -> Optional[bytes]:
         """
@@ -185,33 +166,37 @@ class FineWebDocs:
         Returns:
             Document text as bytes or None if not found
         """
-        self.access_count += 1
+        with self.stats_lock:
+            self.access_count += 1
         
         # Look up shard ID from mapping
         if doc_id not in self.docid_to_shard:
-            self.miss_count += 1
+            with self.stats_lock:
+                self.miss_count += 1
             return None
         
         shard_id = self.docid_to_shard[doc_id]
         
         try:
-            # Get or create environment and transaction
+            # Get or create environment and thread-local transaction
             _, txn = self._get_environment(shard_id)
             
             # Get document bytes
             key = doc_id.encode('utf-8')
             doc_bytes = txn.get(key)
             
-            if doc_bytes is not None:
-                self.hit_count += 1
-                return doc_bytes
-            else:
-                self.miss_count += 1
-                return None
+            with self.stats_lock:
+                if doc_bytes is not None:
+                    self.hit_count += 1
+                else:
+                    self.miss_count += 1
+            
+            return doc_bytes
                 
         except Exception as e:
             print(f"Error retrieving document {doc_id} from shard {shard_id}: {e}")
-            self.miss_count += 1
+            with self.stats_lock:
+                self.miss_count += 1
             return None
     
     def get_multiple_txt(self, doc_ids: List[str]) -> Dict[str, bytes]:
@@ -227,10 +212,12 @@ class FineWebDocs:
         # Group by shard for efficiency
         shard_to_ids = {}
         for doc_id in doc_ids:
-            self.access_count += 1
+            with self.stats_lock:
+                self.access_count += 1
             
             if doc_id not in self.docid_to_shard:
-                self.miss_count += 1
+                with self.stats_lock:
+                    self.miss_count += 1
                 continue
             
             shard_id = self.docid_to_shard[doc_id]
@@ -242,7 +229,7 @@ class FineWebDocs:
         results = {}
         for shard_id, ids in shard_to_ids.items():
             try:
-                # Get environment and transaction
+                # Get environment and thread-local transaction
                 _, txn = self._get_environment(shard_id)
                 
                 # Retrieve all documents in this shard
@@ -250,15 +237,17 @@ class FineWebDocs:
                     key = doc_id.encode('utf-8')
                     doc_bytes = txn.get(key)
                     
-                    if doc_bytes is not None:
-                        results[doc_id] = doc_bytes
-                        self.hit_count += 1
-                    else:
-                        self.miss_count += 1
+                    with self.stats_lock:
+                        if doc_bytes is not None:
+                            results[doc_id] = doc_bytes
+                            self.hit_count += 1
+                        else:
+                            self.miss_count += 1
                         
             except Exception as e:
                 print(f"Error retrieving documents from shard {shard_id}: {e}")
-                self.miss_count += len(ids)
+                with self.stats_lock:
+                    self.miss_count += len(ids)
         
         return results
     
@@ -266,29 +255,33 @@ class FineWebDocs:
         """Get usage statistics for performance monitoring."""
         uptime = time.time() - self.start_time
         
-        stats = {
-            "access_count": self.access_count,
-            "hit_count": self.hit_count,
-            "miss_count": self.miss_count,
-            "hit_rate": self.hit_count / self.access_count if self.access_count > 0 else 0,
-            "open_environments": len(self.envs),
-            "uptime_seconds": uptime,
-            "requests_per_second": self.access_count / uptime if uptime > 0 else 0
-        }
+        with self.stats_lock:
+            stats = {
+                "access_count": self.access_count,
+                "hit_count": self.hit_count,
+                "miss_count": self.miss_count,
+                "hit_rate": self.hit_count / self.access_count if self.access_count > 0 else 0,
+                "open_environments": len(self.envs),
+                "uptime_seconds": uptime,
+                "requests_per_second": self.access_count / uptime if uptime > 0 else 0
+            }
         
         return stats
     
     def close(self):
-        """Close all open environments and transactions."""
-        for shard_id, txn in self.transactions.items():
-            txn.abort()
+        """Close all open environments and thread-local transactions."""
+        # Close any thread-local transactions
+        if hasattr(self.thread_local, 'transactions'):
+            for txn in self.thread_local.transactions.values():
+                txn.abort()
+            self.thread_local.transactions.clear()
         
-        for shard_id, env in self.envs.items():
-            env.close()
-        
-        self.transactions.clear()
-        self.envs.clear()
-        self.env_last_used.clear()
+        # Close all environments
+        with self.env_lock:
+            for env in self.envs.values():
+                env.close()
+            
+            self.envs.clear()
         
         print("All LMDB environments closed")
 
@@ -299,8 +292,7 @@ if __name__ == "__main__":
     doc_manager = FineWebDocs(
         base_dir="/bos/tmp2/jening/fineweb_db/lmdb_full",
         readonly=True,
-        preload_shards=False,  # Set to True if you have enough memory
-        max_cached_envs=10     # Keep 10 most recently used environments open
+        preload_shards=True  # Always preload for best performance
     )
     
     # Example: Retrieve a single document
@@ -316,11 +308,6 @@ if __name__ == "__main__":
             print("Binary content, no preview available")
     else:
         print(f"Document {doc_id} not found")
-    
-    # Example: Batch retrieval
-    doc_ids = ["doc1", "doc2", "doc3"]  # Replace with actual document IDs
-    docs = doc_manager.get_multiple_txt(doc_ids)
-    print(f"Retrieved {len(docs)} out of {len(doc_ids)} requested documents")
     
     # Print stats
     stats = doc_manager.get_stats()

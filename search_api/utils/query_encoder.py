@@ -1,212 +1,323 @@
-import torch
+import queue
+import threading
 import time
-import random
-import string
+import uuid
+from concurrent.futures import Future
+from dataclasses import dataclass
+from typing import List, Optional
+
+import torch
 from sentence_transformers import SentenceTransformer
-from typing import List, Union, Optional
+
+
+@dataclass
+class EncodingRequest:
+    """Container for a single encoding request"""
+    request_id: str
+    query_text: str
+    future: Future
+    timestamp: float
 
 
 class QueryEncoder:
     """
-    A wrapper class for encoding queries using SentenceTransformer models.
-    This class handles model loading and provides an interface for encoding queries.
+    A batch-processing wrapper for encoding queries using SentenceTransformer models.
+    Automatically batches concurrent requests for efficient GPU utilization.
     """
 
     def __init__(
             self,
             model_name: str = "openbmb/MiniCPM-Embedding-Light",
             use_gpu: Optional[bool] = None,
-            use_flash_attention: bool = False
+            use_flash_attention: bool = False,
+            batch_size: int = 32,
+            batch_timeout_ms: int = 50,
+            max_queue_size: int = 1000
     ):
         """
-        Initialize the QueryEncoder with the specified model.
+        Initialize the QueryEncoder with batch processing capabilities.
 
         Args:
             model_name: Name or path of the SentenceTransformer model to load
             use_gpu: Whether to use GPU for encoding. If None, will auto-detect
             use_flash_attention: Whether to use flash attention for faster inference
+            batch_size: Maximum number of queries to batch together
+            batch_timeout_ms: Maximum time to wait for batch to fill (milliseconds)
+            max_queue_size: Maximum number of pending requests in queue
         """
-        # Determine device based on CUDA availability if not explicitly specified
+        # Model setup
         if use_gpu is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
 
-        # Print device information
         print(f"Using device: {self.device}")
 
-        # Set up model kwargs based on device and configuration
+        # Model configuration
         model_kwargs = {"torch_dtype": torch.float16}
-
-        # Add flash attention if requested and using GPU
         if use_flash_attention and self.device.type == "cuda":
             model_kwargs["attn_implementation"] = "flash_attention_2"
             print("Using flash attention for faster inference")
 
         # Load the model
-        self.model = SentenceTransformer(model_name,
-                                         trust_remote_code=True,
-                                         model_kwargs=model_kwargs)
-
-        # Move model to the appropriate device
+        self.model = SentenceTransformer(
+            model_name,
+            trust_remote_code=True,
+            model_kwargs=model_kwargs
+        )
         self.model.to(self.device)
 
         # Default instruction/prompt for query encoding
         self.instruction = "Instruction: Given a web search query, retrieve relevant passages that answer the query. Query: "
 
-        print(f"Model '{model_name}' loaded successfully")
+        # Batch processing configuration
+        self.batch_size = batch_size
+        self.batch_timeout_ms = batch_timeout_ms
+        self.max_queue_size = max_queue_size
 
-    def encode_query(self, query_text: str):
+        # Request queue and processing thread
+        self.request_queue = queue.Queue(maxsize=max_queue_size)
+        self.stop_event = threading.Event()
+        self.processing_thread = threading.Thread(target=self._process_batches, daemon=True)
+        self.processing_thread.start()
+
+        # Statistics
+        self.total_processed = 0
+        self.total_batches = 0
+        self.stats_lock = threading.Lock()
+
+        print(f"Model '{model_name}' loaded successfully with batch processing")
+
+    def _process_batches(self):
+        """Background thread that processes batches of encoding requests"""
+        while not self.stop_event.is_set():
+            batch = self._collect_batch()
+            if batch:
+                self._encode_batch(batch)
+
+    def _collect_batch(self) -> List[EncodingRequest]:
+        """
+        Collect requests for batch processing.
+        Returns when batch is full or timeout is reached.
+        """
+        batch = []
+        deadline = time.time() + (self.batch_timeout_ms / 1000.0)
+
+        while len(batch) < self.batch_size:
+            try:
+                # Calculate remaining time
+                timeout = max(0, deadline - time.time())
+
+                if timeout <= 0 and batch:
+                    # Timeout reached and we have at least one request
+                    break
+
+                # Try to get a request from queue
+                request = self.request_queue.get(timeout=timeout if batch else None)
+                batch.append(request)
+
+            except queue.Empty:
+                if batch:
+                    # Timeout reached with partial batch
+                    break
+                # Continue waiting if no requests yet
+
+        return batch
+
+    def _encode_batch(self, batch: List[EncodingRequest]):
+        """Process a batch of encoding requests"""
+        try:
+            # Extract query texts
+            query_texts = [req.query_text for req in batch]
+            # print("Encode batch size:", len(query_texts))
+
+            # Batch encode with instruction prefix
+            embeddings = self.model.encode(
+                query_texts,
+                prompt=self.instruction,
+                convert_to_numpy=True,
+                show_progress_bar=False
+            )
+
+            # Distribute results to futures
+            for i, req in enumerate(batch):
+                req.future.set_result(embeddings[i])
+
+            # Update statistics
+            with self.stats_lock:
+                self.total_processed += len(batch)
+                self.total_batches += 1
+
+        except Exception as e:
+            # Set exception for all requests in batch
+            for req in batch:
+                req.future.set_exception(e)
+
+    def encode_query(self, query_text: str, timeout: Optional[float] = 30.0) -> torch.Tensor:
         """
         Encode a single query text into embedding.
+        Thread-safe method that can be called concurrently.
 
         Args:
             query_text: The query text to encode
+            timeout: Maximum time to wait for result (seconds)
 
         Returns:
-            A tensor containing the query embedding
+            A numpy array containing the query embedding
         """
-        # Convert the single string to a list for the model
-        queries = [query_text]
+        # Create request with future
+        future = Future()
+        request = EncodingRequest(
+            request_id=str(uuid.uuid4()),
+            query_text=query_text,
+            future=future,
+            timestamp=time.time()
+        )
 
-        # Encode the query with the instruction prefix
-        embedding = self.model.encode(queries, prompt=self.instruction)
+        # Submit to queue
+        try:
+            self.request_queue.put(request, timeout=1.0)
+        except queue.Full:
+            raise RuntimeError("Encoding queue is full, too many pending requests")
 
-        # Return the embedding tensor
-        return embedding[0]
+        # Wait for result
+        try:
+            embedding = future.result(timeout=timeout)
+            return embedding
+        except TimeoutError:
+            raise TimeoutError(f"Encoding timeout after {timeout} seconds")
 
-    def encode_queries(self, query_texts: List[str]):
+    def encode_queries(self, query_texts: List[str], timeout: Optional[float] = 30.0) -> List[torch.Tensor]:
         """
-        Encode multiple query texts into embeddings.
+        Encode multiple query texts.
+        This method submits all queries at once for efficient batching.
 
         Args:
             query_texts: List of query texts to encode
+            timeout: Maximum time to wait for all results (seconds)
 
         Returns:
-            A tensor containing the query embeddings
+            List of numpy arrays containing query embeddings
         """
-        # Encode all queries with the instruction prefix
-        embeddings = self.model.encode(query_texts, prompt=self.instruction)
+        # Create all requests
+        requests = []
+        for query_text in query_texts:
+            future = Future()
+            request = EncodingRequest(
+                request_id=str(uuid.uuid4()),
+                query_text=query_text,
+                future=future,
+                timestamp=time.time()
+            )
+            requests.append(request)
 
-        # Return the embedding tensor
-        return torch.tensor(embeddings, device=self.device)
+        # Submit all to queue
+        for request in requests:
+            try:
+                self.request_queue.put(request, timeout=1.0)
+            except queue.Full:
+                # Cancel remaining futures
+                for req in requests:
+                    if not req.future.done():
+                        req.future.cancel()
+                raise RuntimeError("Encoding queue is full")
 
-    def encode_passages(self, passages: List[str]) -> torch.Tensor:
-        """
-        Encode passages (documents) into embeddings.
-        Note: Usually passages don't need the query instruction prefix.
+        # Collect all results
+        results = []
+        for request in requests:
+            try:
+                embedding = request.future.result(timeout=timeout)
+                results.append(embedding)
+            except Exception as e:
+                # Cancel remaining futures on error
+                for req in requests:
+                    if not req.future.done():
+                        req.future.cancel()
+                raise e
 
-        Args:
-            passages: List of passages to encode
+        return results
 
-        Returns:
-            A tensor containing the passage embeddings
-        """
-        # Encode passages without the query instruction
-        embeddings = self.model.encode(passages)
+    def get_stats(self) -> dict:
+        """Get processing statistics"""
+        with self.stats_lock:
+            avg_batch_size = self.total_processed / self.total_batches if self.total_batches > 0 else 0
+            return {
+                "total_processed": self.total_processed,
+                "total_batches": self.total_batches,
+                "average_batch_size": avg_batch_size,
+                "queue_size": self.request_queue.qsize(),
+                "device": str(self.device)
+            }
 
-        # Return the embedding tensor
-        return torch.tensor(embeddings, device=self.device)
+    def close(self):
+        """Gracefully shutdown the encoder"""
+        print("Shutting down QueryEncoder...")
+        self.stop_event.set()
 
-    def calculate_similarity(self, query_embedding: torch.Tensor, passage_embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Calculate similarity scores between a query embedding and passage embeddings.
+        # Process remaining requests
+        while not self.request_queue.empty():
+            time.sleep(0.1)
 
-        Args:
-            query_embedding: The query embedding tensor
-            passage_embeddings: The passage embeddings tensor
-
-        Returns:
-            A tensor containing similarity scores
-        """
-        # Ensure query_embedding is 2D if it's just a single embedding
-        if query_embedding.dim() == 1:
-            query_embedding = query_embedding.unsqueeze(0)
-
-        # Calculate dot product similarity
-        return (query_embedding @ passage_embeddings.T).squeeze()
-
-    def benchmark_query_time(self):
-        def generate_random_text(approx_length=50):
-            words = []
-            current_length = 0
-
-            # Generate words until we reach approximate desired length
-            while current_length < approx_length:
-                # Generate random word length between 3 and 10 characters
-                word_length = random.randint(3, 10)
-                word = ''.join(random.choices(string.ascii_lowercase, k=word_length))
-                words.append(word)
-                current_length += word_length + 1  # +1 for space
-
-            return ' '.join(words)
-
-        # Generate 50 random texts
-        print("Generating 50 random query texts...")
-        num_queries = 50
-        query_pool = [generate_random_text(50) for _ in range(num_queries)]
-
-        # Print a few sample queries
-        print(f"Sample queries from the pool:")
-        for i in range(min(5, len(query_pool))):
-            print(f"  {i + 1}. {query_pool[i]}")
-
-        # Randomly select and encode 100 times
-        print(f"\nRunning 100 random encoding operations...")
-        total_time = 0
-        encoding_times = []
-
-        for i in range(100):
-            # Randomly select a query from the pool
-            random_query = random.choice(query_pool)
-
-            # Time the encoding operation
-            start_time = time.time()
-            self.encode_query(random_query)
-            end_time = time.time()
-
-            # Calculate and accumulate time
-            elapsed_time = end_time - start_time
-            encoding_times.append(elapsed_time)
-            total_time += elapsed_time
-
-            # Progress indicator every 10 operations
-            if (i + 1) % 10 == 0:
-                print(f"  Completed {i + 1}/100 encoding operations...")
-
-        # Calculate statistics
-        avg_time = total_time / 100
-        min_time = min(encoding_times)
-        max_time = max(encoding_times)
-
-        # Display results
-        print("\nEncoding Performance Results:")
-        print(f"  Total time for 100 encoding operations: {total_time:.4f} seconds")
-        print(f"  Average encoding time per query: {avg_time:.4f} seconds")
-        print(f"  Minimum encoding time: {min_time:.4f} seconds")
-        print(f"  Maximum encoding time: {max_time:.4f} seconds")
+        self.processing_thread.join(timeout=5.0)
+        print("QueryEncoder shutdown complete")
 
 
-# Usage example
+# Example usage and testing
 if __name__ == "__main__":
-    encoder = QueryEncoder()
-    encoder.benchmark_query_time()
+    import concurrent.futures
+    import random
+    import string
 
-# # Initialize the encoder
-# encoder = QueryEncoder(use_flash_attention=False)
-#
-# # Encode a query
-# query = "中国的首都是哪里？"  # "What is the capital of China?"
-# query_embedding = encoder.encode_query(query)
-#
-# # Encode passages
-# passages = ["beijing", "shanghai"]  # "北京", "上海"
-# passage_embeddings = encoder.encode_passages(passages)
-#
-# # Calculate similarity scores
-# scores = encoder.calculate_similarity(query_embedding, passage_embeddings)
-#
-# # Print results
-# print(f"Query: {query}")
-# print(f"Passages: {passages}")
-# print(f"Similarity scores: {scores.tolist()}")
+
+    def generate_random_query(length=50):
+        """Generate a random query for testing"""
+        words = []
+        for _ in range(5, 10):
+            word = ''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 8)))
+            words.append(word)
+        return ' '.join(words)
+
+
+    # Initialize encoder
+    encoder = QueryEncoder(
+        batch_size=16,  # Process up to 16 queries at once
+        batch_timeout_ms=20  # Wait up to 20ms for batch to fill
+    )
+
+    print("\n=== Testing Concurrent Encoding ===")
+
+    # Test concurrent encoding
+    num_queries = 100
+    queries = [generate_random_query() for _ in range(num_queries)]
+
+    start_time = time.time()
+
+    # Submit queries concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for query in queries:
+            future = executor.submit(encoder.encode_query, query)
+            futures.append(future)
+
+        # Collect results
+        results = []
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                embedding = future.result()
+                results.append(embedding)
+            except Exception as e:
+                print(f"Error: {e}")
+
+    end_time = time.time()
+
+    print(f"\nProcessed {len(results)} queries in {end_time - start_time:.2f} seconds")
+    print(f"Average time per query: {(end_time - start_time) / len(results) * 1000:.2f} ms")
+
+    # Print statistics
+    stats = encoder.get_stats()
+    print("\n=== Processing Statistics ===")
+    for key, value in stats.items():
+        print(f"{key}: {value}")
+
+    # Cleanup
+    encoder.close()

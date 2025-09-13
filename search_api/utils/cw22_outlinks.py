@@ -1,7 +1,6 @@
 import gzip
 import os
 import re
-import json
 
 
 class ClueWeb22Outlinks:
@@ -32,20 +31,13 @@ class ClueWeb22Outlinks:
 
     def __init__(self, cw22_dir_root='/bos/tmp1/ClueWeb22_B'):
         """
-        Prepare to access ClueWeb22 documents.
+        Initialize ClueWeb22 outlinks fetcher.
 
-        cw22_dir_root:	For example, '/bos/tmp1/ClueWeb22_L'
+        Args:
+            cw22_dir_root: Root directory of ClueWeb22 files (e.g., '/bos/tmp1/ClueWeb22_B')
         """
-
-        # Location of ClueWeb22 files.
+        # Store path to outlink directory (read-only, thread-safe)
         self.cw22_dir_outlink = os.path.join(cw22_dir_root, 'outlink')
-
-        # Files do not close after a read in case the next lookup is
-        # from the same files. These variables describe the open files.
-        self._fn_subdir = None  # E.g., en0102
-        self._fn_file_seq = None  # E.g., 03
-        self._fptr_json = None  # File ptr
-        self._fptr_offset = None  # File ptr
 
     def __str__(self):
         """Human readable information about class instances."""
@@ -66,49 +58,52 @@ class ClueWeb22Outlinks:
 
         return ((doc_start, doc_end))
 
-    def _open_files(self, lang, stream, subdir, file_seq):
-        """
-        Return file pointers for a .json.gz file and its .offset file.
-        The files may be open from a previous access.
-        """
-
-        # If an open json file does not contain the document...
-        if ((self._fn_subdir != subdir) or
-                (self._fn_file_seq != file_seq)):
-
-            # Close any open files
-            if self._fptr_json != None:
-                self._fptr_json.close()
-                self._fptr_offset.close()
-
-            # Open the right files
-            path = os.path.join(self.cw22_dir_outlink, lang, stream, subdir,
-                                f'{subdir}-{file_seq}')
-            self._fptr_json = open(f'{path}.json.gz', 'rb')
-            self._fptr_offset = open(f'{path}.offset', 'rb')
-            self._fn_subdir = subdir
-            self._fn_file_seq = file_seq
-
-        return ((self._fptr_offset, self._fptr_json))
-
     def get_outlink(self, docid):
-        """Get the outlink representation of a ClueWeb22 document"""
+        """
+        Get the outlink representation of a ClueWeb22 document.
 
-        # Parse the ClueWeb22 docid
-        matches = ClueWeb22Outlinks.cwid_regex.search(docid)
+        Thread-safe implementation: Each call opens files independently,
+        reads the required data, and immediately closes files.
+
+        Args:
+            docid: ClueWeb22 document ID (e.g., 'clueweb22-en0102-03-00004')
+
+        Returns:
+            bytes: Decompressed outlink content
+
+        Raises:
+            ValueError: If docid format is invalid
+            IOError: If file reading fails
+        """
+        # Parse the ClueWeb22 document ID
+        matches = self.cwid_regex.search(docid)
+        if not matches:
+            raise ValueError(f"Invalid ClueWeb22 docid format: {docid}")
+
+        # Extract components from regex groups
         lang, stream, subdir, file_seq, doc_seq = matches.group(3, 2, 1, 6, 7)
 
-        # Open the .offset and .json.gz files if they are not open already
-        fptr_offset, fptr_json = \
-            self._open_files(lang, stream, subdir, file_seq)
+        # Build file paths
+        base_path = os.path.join(self.cw22_dir_outlink, lang, stream, subdir,
+                                 f'{subdir}-{file_seq}')
+        json_path = f'{base_path}.json.gz'
+        offset_path = f'{base_path}.offset'
 
-        # Extract the document
-        doc_start, doc_end = self._get_offsets(fptr_offset, doc_seq)
-        fptr_json.seek(doc_start, 0)
-        doc = fptr_json.read(doc_end - doc_start)
-        doc = gzip.decompress(doc)
+        try:
+            # Step 1: Read offset information (independent file handle)
+            with open(offset_path, 'rb') as offset_fptr:
+                doc_start, doc_end = self._get_offsets(offset_fptr, doc_seq)
 
-        return doc
+            # Step 2: Read compressed document data (independent file handle)
+            with open(json_path, 'rb') as json_fptr:
+                json_fptr.seek(doc_start, 0)
+                compressed_doc = json_fptr.read(doc_end - doc_start)
+
+            # Step 3: Decompress and return (no file I/O, thread-safe)
+            return gzip.decompress(compressed_doc)
+
+        except (IOError, OSError) as e:
+            raise IOError(f"Failed to read outlink document {docid}: {e}")
 
     def enumerate_doc_ids(self):
         # Base directory for en00 subdirectories
@@ -170,37 +165,3 @@ class ClueWeb22Outlinks:
                     # Format: clueweb22-en0000-00-00000
                     doc_id = f"clueweb22-{file_subdir}-{file_seq}-{doc_seq:05d}"
                     yield doc_id
-
-# if __name__ == "__main__":
-#     # Print the first 10 document IDs as an example
-#     cw2_docs = ClueWeb22Outlinks()
-#     last_id = None
-#     prev_partition_id = None
-#     cnt = 0
-#
-#     for i, doc_id in enumerate(cw2_docs.enumerate_doc_ids()):
-#         partition_id = doc_id.split("-")[2]
-#         if partition_id != prev_partition_id:
-#             print(cnt, last_id)
-#             cnt = 0
-#         else:
-#             cnt += 1
-#         prev_partition_id = partition_id
-#         last_id = doc_id
-#
-#         if partition_id == "99":
-#             break
-
-# if __name__ == "__main__":
-#     doc_ids = ["clueweb22-en0035-22-03042",
-#                "clueweb22-en0036-00-17596",
-#                "clueweb22-en0041-84-02366",
-#                "clueweb22-en0038-21-02172",
-#                "clueweb22-en0040-20-05288"]
-#     cw2_docs = ClueWeb22Outlinks()
-#
-#     for docid in doc_ids:
-#         doc_text = cw2_docs.get_outlink(docid)
-#         print("-------------------------------------------")
-#         print(docid)
-#         print(doc_text)

@@ -1,23 +1,28 @@
 import gzip
 import os
 import re
-import json
+import threading
+from collections import OrderedDict
 
 
 class ClueWeb22Docs:
     """
-    Fetch ClueWeb22 documents. Currently only supports the txt file
-    hierarchy. Upgrading too support the html (warc.gz) hierarchy
-    would be easy.
+    Thread-safe ClueWeb22 document fetcher with thread-local file handle caching.
+
+    Each thread maintains its own LRU cache of file handles (default: 10 files per thread).
+    This provides excellent performance for repeated access while keeping FD usage bounded.
+
+    For 20 threads: max FD usage = 20 × 10 = 200 file descriptors.
 
     Usage:
-        cw22_docs('/bos/tmp1/ClueWeb22_L')
+        cw22_docs = ClueWeb22Docs('/bos/tmp1/ClueWeb22_L')
+        doc_text = cw22_docs.get_txt('clueweb22-en0102-03-00004')
 
-    	.get_txt('clueweb22-en0102-03-00004')
+        # Optional cleanup (useful in long-running threads)
+        cw22_docs.cleanup_thread_cache()
     """
 
-    # ------------------ Global variables ---------------------- #
-
+    # Regex pattern for parsing ClueWeb22 document IDs
     cwid_regex = re.compile(
         "^clueweb22-"
         "((((?:de)|(?:en)|(?:es)|(?:fr)|(?:it)|(?:ja)|(?:nl)|(?:pl)|(?:pt)"
@@ -28,104 +33,219 @@ class ClueWeb22Docs:
         "([0-9]{5})$"
     )
 
-    # ------------------ Methods (alphabetical order) ---------- #
-
-    def __init__(self, cw22_dir_root='/bos/tmp1/ClueWeb22_B'):
+    def __init__(self, cw22_dir_root='/bos/tmp1/ClueWeb22_L', max_files_per_thread=10):
         """
-        Prepare to access ClueWeb22 documents.
+        Initialize ClueWeb22 document fetcher with thread-local file handle caching.
 
-        cw22_dir_root:	For example, '/bos/tmp1/ClueWeb22_L'
+        Args:
+            cw22_dir_root: Root directory of ClueWeb22 files (e.g., '/bos/tmp1/ClueWeb22_L')
+            max_files_per_thread: Maximum file handles per thread (default: 10)
         """
-
-        # Location of ClueWeb22 files.
+        # Store path to txt directory (read-only, thread-safe)
         self.cw22_dir_txt = os.path.join(cw22_dir_root, 'txt')
 
-        # Files do not close after a read in case the next lookup is
-        # from the same files. These variables describe the open files.
-        self._fn_subdir = None  # E.g., en0102
-        self._fn_file_seq = None  # E.g., 03
-        self._fptr_json = None  # File ptr
-        self._fptr_offset = None  # File ptr
+        # Thread-local storage for file handle caching
+        self.thread_local = threading.local()
+        self.max_files_per_thread = max_files_per_thread
 
     def __str__(self):
-        """Human readable information about class instances."""
-        return (str(self.__dict__))
+        """Return human-readable information about the instance."""
+        return str(self.__dict__)
+
+    def _get_thread_file_cache(self):
+        """
+        Get or create thread-local file handle cache.
+
+        Returns:
+            OrderedDict: LRU cache of file handles for current thread
+        """
+        if not hasattr(self.thread_local, 'file_cache'):
+            # Initialize thread-local LRU cache using OrderedDict
+            self.thread_local.file_cache = OrderedDict()
+        return self.thread_local.file_cache
+
+    def _get_file_handles(self, lang, stream, subdir, file_seq):
+        """
+        Get file handles from thread-local cache or open new ones.
+
+        Args:
+            lang: Language code
+            stream: Stream identifier
+            subdir: Subdirectory name
+            file_seq: File sequence number
+
+        Returns:
+            tuple: (offset_fptr, json_fptr) file handles
+        """
+        file_cache = self._get_thread_file_cache()
+        cache_key = (lang, stream, subdir, file_seq)
+
+        # Check if handles exist in thread-local cache
+        if cache_key in file_cache:
+            # Move to end (mark as recently used)
+            file_handles = file_cache.pop(cache_key)
+            file_cache[cache_key] = file_handles
+            return file_handles
+
+        # Need to open new file handles
+        base_path = os.path.join(self.cw22_dir_txt, lang, stream, subdir,
+                                 f'{subdir}-{file_seq}')
+        json_path = f'{base_path}.json.gz'
+        offset_path = f'{base_path}.offset'
+
+        try:
+            # Open new file handles
+            offset_fptr = open(offset_path, 'rb')
+            json_fptr = open(json_path, 'rb')
+            file_handles = (offset_fptr, json_fptr)
+
+            # Check if cache is full and needs eviction
+            if len(file_cache) >= self.max_files_per_thread:
+                # Remove least recently used item (first item in OrderedDict)
+                old_key, old_handles = file_cache.popitem(last=False)
+                old_offset_fptr, old_json_fptr = old_handles
+                try:
+                    old_offset_fptr.close()
+                    old_json_fptr.close()
+                except:
+                    pass  # Ignore errors during cleanup
+
+            # Add new handles to cache
+            file_cache[cache_key] = file_handles
+            return file_handles
+
+        except (IOError, OSError) as e:
+            raise IOError(f"Failed to open files for {cache_key}: {e}")
 
     def _get_offsets(self, fptr_offset, doc_seq):
         """
-        Get the starting and ending byte offsets of a document from
-        an open .offsets file.
+        Extract document start and end byte offsets from an open offset file.
+
+        Args:
+            fptr_offset: Open file pointer to .offset file
+            doc_seq: Document sequence number
+
+        Returns:
+            tuple: (doc_start_offset, doc_end_offset)
         """
+        offset_entry_length = 11  # 10 digits + newline character
 
-        cw22_offset_length = 11  # 10 characters per offset + newline
+        # Seek to the offset entry for this document
+        fptr_offset.seek(int(doc_seq) * offset_entry_length, 0)
 
-        fptr_offset.seek(int(doc_seq) * cw22_offset_length, 0)
-        doc_start = int(fptr_offset.read(cw22_offset_length - 1))
-        fptr_offset.read(1)  # skip newline
-        doc_end = int(fptr_offset.read(cw22_offset_length - 1))
+        # Read start offset
+        doc_start = int(fptr_offset.read(offset_entry_length - 1))
+        fptr_offset.read(1)  # Skip newline
 
-        return ((doc_start, doc_end))
+        # Read end offset
+        doc_end = int(fptr_offset.read(offset_entry_length - 1))
 
-    def _open_files(self, lang, stream, subdir, file_seq):
-        """
-        Return file pointers for a .json.gz file and its .offset file.
-        The files may be open from a previous access.
-        """
-
-        # If an open json file does not contain the document...
-        if ((self._fn_subdir != subdir) or
-                (self._fn_file_seq != file_seq)):
-
-            # Close any open files
-            if self._fptr_json != None:
-                self._fptr_json.close()
-                self._fptr_offset.close()
-
-            # Open the right files
-            path = os.path.join(self.cw22_dir_txt, lang, stream, subdir,
-                                f'{subdir}-{file_seq}')
-            self._fptr_json = open(f'{path}.json.gz', 'rb')
-            self._fptr_offset = open(f'{path}.offset', 'rb')
-            self._fn_subdir = subdir
-            self._fn_file_seq = file_seq
-
-        return ((self._fptr_offset, self._fptr_json))
+        return (doc_start, doc_end)
 
     def get_txt(self, docid):
-        """Get the txt representation of a ClueWeb22 document"""
+        """
+        Get the text representation of a ClueWeb22 document.
 
-        # Parse the ClueWeb22 docid
-        matches = ClueWeb22Docs.cwid_regex.search(docid)
+        Thread-safe implementation using thread-local file handle caching.
+        Each thread maintains its own LRU cache of file handles for efficiency.
+
+        Args:
+            docid: ClueWeb22 document ID (e.g., 'clueweb22-en0102-03-00004')
+
+        Returns:
+            bytes: Decompressed document content
+
+        Raises:
+            ValueError: If docid format is invalid
+            IOError: If file reading fails
+        """
+        # Parse the ClueWeb22 document ID
+        matches = self.cwid_regex.search(docid)
+        if not matches:
+            raise ValueError(f"Invalid ClueWeb22 docid format: {docid}")
+
+        # Extract components from regex groups
         lang, stream, subdir, file_seq, doc_seq = matches.group(3, 2, 1, 6, 7)
 
-        # Open the .offset and .json.gz files if they are not open already
-        fptr_offset, fptr_json = \
-            self._open_files(lang, stream, subdir, file_seq)
+        try:
+            # Get file handles from thread-local cache
+            offset_fptr, json_fptr = self._get_file_handles(lang, stream, subdir, file_seq)
 
-        # Extract the document
-        doc_start, doc_end = self._get_offsets(fptr_offset, doc_seq)
-        fptr_json.seek(doc_start, 0)
-        doc = fptr_json.read(doc_end - doc_start)
-        doc = gzip.decompress(doc)
+            # Extract document byte offsets
+            doc_start, doc_end = self._get_offsets(offset_fptr, doc_seq)
 
-        return doc
+            # Read compressed document data
+            json_fptr.seek(doc_start, 0)
+            compressed_doc = json_fptr.read(doc_end - doc_start)
+
+            # Decompress and return
+            return gzip.decompress(compressed_doc)
+
+        except (IOError, OSError) as e:
+            raise IOError(f"Failed to read document {docid}: {e}")
+
+    def cleanup_thread_cache(self):
+        """
+        Manually cleanup thread-local file handle cache.
+        Can be called periodically or when thread is finishing.
+        """
+        if hasattr(self.thread_local, 'file_cache'):
+            file_cache = self.thread_local.file_cache
+            for handles in file_cache.values():
+                offset_fptr, json_fptr = handles
+                try:
+                    offset_fptr.close()
+                    json_fptr.close()
+                except:
+                    pass  # Ignore errors during cleanup
+            file_cache.clear()
+
+    def get_thread_cache_stats(self):
+        """
+        Get statistics about current thread's file handle cache.
+
+        Returns:
+            dict: Cache statistics including size and cached files
+        """
+        if not hasattr(self.thread_local, 'file_cache'):
+            return {
+                "cache_size": 0,
+                "max_cache_size": self.max_files_per_thread,
+                "cached_files": []
+            }
+
+        file_cache = self.thread_local.file_cache
+        return {
+            "cache_size": len(file_cache),
+            "max_cache_size": self.max_files_per_thread,
+            "cached_files": list(file_cache.keys())
+        }
 
     def enumerate_doc_ids(self):
-        # Base directory for en00 subdirectories
+        """
+        Generator that yields all available document IDs in the en00 stream.
+
+        Note: This method is not optimized for concurrent access as it's
+        typically used for dataset exploration, not high-QPS serving.
+
+        Yields:
+            str: ClueWeb22 document IDs
+        """
+        # Base directory for English documents (stream en00)
         base_dir = os.path.join(self.cw22_dir_txt, 'en', 'en00')
 
-        # Pattern for offset files (like en0000-31.offset)
+        # Pattern for offset files (e.g., en0000-31.offset)
         file_pattern = re.compile(r'(en\d{4})-(\d{2})\.offset')
 
         # Iterate through subdirectories (en0000, en0001, etc.)
         for subdir in sorted(os.listdir(base_dir)):
             subdir_path = os.path.join(base_dir, subdir)
 
-            # Check if it's a directory and has the right format (en0000, en0001, etc.)
+            # Validate directory format
             if not os.path.isdir(subdir_path) or not re.match(r'en\d{4}', subdir):
                 continue
 
-            # Iterate through files in the subdirectory
+            # Process files in each subdirectory
             for filename in sorted(os.listdir(subdir_path)):
                 # Skip checksum files
                 if filename.endswith('.checksum'):
@@ -135,73 +255,73 @@ class ClueWeb22Docs:
                 if not match:
                     continue
 
-                # Get subdir and file_seq from the filename
+                # Extract file components
                 file_subdir, file_seq = match.groups()
 
-                # Check if the corresponding JSON.gz file exists
+                # Verify corresponding JSON file exists
                 json_file = os.path.join(subdir_path, f"{file_subdir}-{file_seq}.json.gz")
                 if not os.path.exists(json_file):
                     continue
 
-                # Determine the number of documents in this file
+                # Calculate number of documents in this file
                 offset_file = os.path.join(subdir_path, filename)
-                with open(offset_file, 'rb') as f:
-                    # Get file size
-                    f.seek(0, 2)
-                    file_size = f.tell()
+                try:
+                    with open(offset_file, 'rb') as f:
+                        f.seek(0, 2)  # Seek to end
+                        file_size = f.tell()
 
-                    # Each offset is 11 bytes (10 digits + newline)
-                    if file_size % 11 != 0:
-                        print(f"Warning: Offset file {offset_file} size {file_size} is not a multiple of 11")
-                        continue
+                        # Validate file format (each offset is 11 bytes)
+                        if file_size % 11 != 0:
+                            print(f"Warning: Offset file {offset_file} size {file_size} "
+                                  f"is not a multiple of 11")
+                            continue
 
-                    # Calculate the number of offsets
-                    num_offsets = file_size // 11
+                        # Calculate document count
+                        num_offsets = file_size // 11
+                        num_docs = num_offsets - 1  # N offsets = N-1 documents
 
-                    # The number of documents is one less than the number of offsets
-                    # (since each document spans from one offset to the next)
-                    num_docs = num_offsets - 1
+                        if num_docs <= 0:
+                            continue
 
-                    if num_docs <= 0:
-                        continue
+                    # Generate document IDs
+                    for doc_seq in range(num_docs):
+                        doc_id = f"clueweb22-{file_subdir}-{file_seq}-{doc_seq:05d}"
+                        yield doc_id
 
-                # Generate document IDs
-                for doc_seq in range(num_docs):
-                    # Format: clueweb22-en0000-00-00000
-                    doc_id = f"clueweb22-{file_subdir}-{file_seq}-{doc_seq:05d}"
-                    yield doc_id
+                except (IOError, OSError) as e:
+                    print(f"Error reading offset file {offset_file}: {e}")
+                    continue
 
-# if __name__ == "__main__":
-#     # Print the first 10 document IDs as an example
-#     cw2_docs = ClueWeb22Docs()
-#     last_id = None
-#     prev_partition_id = None
-#     cnt = 0
-#
-#     for i, doc_id in enumerate(cw2_docs.enumerate_doc_ids()):
-#         partition_id = doc_id.split("-")[2]
-#         if partition_id != prev_partition_id:
-#             print(cnt, last_id)
-#             cnt = 0
-#         else:
-#             cnt += 1
-#         prev_partition_id = partition_id
-#         last_id = doc_id
-#
-#         if partition_id == "99":
-#             break
 
 if __name__ == "__main__":
-    doc_ids = ["clueweb22-en0035-22-03042",
-               "clueweb22-en0036-00-17596",
-               "clueweb22-en0041-84-02366",
-               "clueweb22-en0038-21-02172",
-               "clueweb22-en0040-20-05288"]
-    cw2_docs = ClueWeb22Docs()
+    # Example usage and testing
+    doc_ids = [
+        "clueweb22-en0035-22-03042",
+        "clueweb22-en0036-00-17596",
+        "clueweb22-en0041-84-02366",
+        "clueweb22-en0038-21-02172",
+        "clueweb22-en0040-20-05288"
+    ]
+
+    # Initialize with custom cache size
+    cw22_docs = ClueWeb22Docs(max_files_per_thread=5)
 
     for docid in doc_ids:
-        doc_text = cw2_docs.get_txt(docid)
-        print("-------------------------------------------")
-        print(docid)
-        print(type(doc_text))
-        print(doc_text)
+        try:
+            doc_text = cw22_docs.get_txt(docid)
+            print("-------------------------------------------")
+            print(f"Document ID: {docid}")
+            print(f"Content type: {type(doc_text)}")
+            print(f"Content preview: {doc_text[:200]}...")  # First 200 bytes
+
+            # Show cache stats after each access
+            stats = cw22_docs.get_thread_cache_stats()
+            print(f"Cache: {stats['cache_size']}/{stats['max_cache_size']} files")
+
+        except Exception as e:
+            print(f"Error retrieving {docid}: {e}")
+
+    print("\nFinal cache stats:", cw22_docs.get_thread_cache_stats())
+
+    # Clean up cache when done (optional but recommended for long-running processes)
+    cw22_docs.cleanup_thread_cache()

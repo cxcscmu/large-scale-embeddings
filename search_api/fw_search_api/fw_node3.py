@@ -48,7 +48,7 @@ def init_index():
 
     try:
         index = StaticDiskIndex(index_directory=index_dir,
-                                num_threads=16,
+                                num_threads=4,
                                 num_nodes_to_cache=30000,
                                 cache_mechanism=1,
                                 distance_metric='mips',

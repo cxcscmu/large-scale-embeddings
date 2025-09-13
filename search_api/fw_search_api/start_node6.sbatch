@@ -3,8 +3,8 @@
 #SBATCH --nodelist=boston-1-29
 #SBATCH --partition=ssd
 #SBATCH --mem=16G
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=2
 #SBATCH --time=infinite
 #SBATCH --output=node_log/fw_node_6.log
 #SBATCH --error=node_log/fw_node_6.err
