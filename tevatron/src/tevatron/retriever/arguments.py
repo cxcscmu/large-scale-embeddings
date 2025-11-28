@@ -161,6 +161,7 @@ class DataArguments:
 class TevatronDataArguments(DataArguments): 
     clueweb_api_dataset: bool = field(default=False, metadata={"help": "Whether this dataset needs clueweb api for dynamic generation on ClueWeb corpus"})
     marcoweb_api_dataset: bool = field(default=False, metadata={"help": "Whether this dataset needs clueweb api for dynamic generation on MarcoWeb corpus"})
+    amazon_dataset: bool = field(default=False, metadata={"help": "Whether this dataset is Amazon dataset"})
     langs: List[str] = field(default_factory=lambda: ["de", "en", "es", "fr", "it", "ja", "nl", "other", "pl", "pt", "zh_chs"], metadata={"help": "Languages to process for the clueweb api"})
 
 @dataclass

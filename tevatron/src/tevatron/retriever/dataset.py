@@ -504,3 +504,49 @@ class EncodeDataset_ClueWeb22(Dataset):
             )
 
         return text_id, formated_text
+
+
+class EncodeDataset_Amazon(Dataset):
+
+    def __init__(self, data_args: DataArguments):
+        self.data_args = data_args
+        self.dataset_dir = self.data_args.dataset_path
+
+        if self.data_args.encode_is_query:
+            raise NotImplementedError("Amazon dataset doesn't have query.")
+        else: 
+            data = pd.read_csv(self.data_args.dataset_path, sep='\t')
+            data.dropna(subset=['item_id:token', 'title:token'], inplace=True)
+            # Store as list of tuples for faster access
+            self.encode_data = list(zip(
+                data['item_id:token'].tolist(),
+                data['categories:token'].tolist(),
+                data['title:token'].tolist()
+            ))
+            
+        logger.info(f"EncodeDataset_Amazon total length: {len(self.encode_data)}")
+
+        if self.data_args.dataset_number_of_shards > 1:
+            self.encode_data = create_shards(
+                data=self.encode_data, 
+                num_shards=self.data_args.dataset_number_of_shards, 
+                index=self.data_args.dataset_shard_index
+            )
+        logger.info(f"EncodeDataset_Amazon shard {self.data_args.dataset_shard_index} length: {len(self.encode_data)}")
+
+    def __len__(self):
+        return len(self.encode_data)
+
+    def __getitem__(self, item) -> Tuple[str, str]:
+        if self.data_args.encode_is_query:
+            raise NotImplementedError("Amazon dataset doesn't have query.")
+        else:
+            item_id, category, title = self.encode_data[item]
+            formated_text = format_passage(
+                category,
+                title,
+                self.data_args.passage_prefix,
+                self.data_args.add_markers,
+            )
+
+        return item_id, formated_text
