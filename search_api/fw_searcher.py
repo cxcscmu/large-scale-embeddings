@@ -7,12 +7,15 @@ from contextlib import contextmanager
 
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 from utils.fineweb_files import FineWebDocs
 from utils.performance_monitor import PerformanceMonitor
-from utils.query_encoder import QueryEncoder
 
+# from utils.query_encoder import QueryEncoder
+from utils.query_encoder_infinity import QueryEncoder
 
 class FineWebSearcher:
     """
@@ -81,6 +84,19 @@ class FineWebSearcher:
 
         self.session_id = random.randint(1, 2147483647)
         self.session = requests.Session()
+
+        adapter = HTTPAdapter(
+            pool_connections=50,  # 40 endpoints + 10 buffer
+            pool_maxsize=20,  # Handle worst case: 20 concurrent requests per endpoint
+            max_retries=Retry(
+                total=3,
+                backoff_factor=0.3,
+                status_forcelist=[500, 502, 503, 504]
+            )
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         print(f"---FineWebSearcher Init Step 4: Search session id {self.session_id}---")
 
         # Track distribution of results across shards
@@ -183,23 +199,26 @@ class FineWebSearcher:
         if complexity is None:
             complexity = 5 * k
 
-        def query_shard(shard_id, q_emb, complexity):
-            """Helper function to query a single shard"""
+        # Pre-serialize payload once to avoid redundant JSON encoding across shards
+        import json
+        payload_dict = {
+            "q_emb": q_emb,
+            "k": k,
+            "complexity": complexity
+        }
+        json_payload = json.dumps(payload_dict)
+        headers = {'Content-Type': 'application/json'}
+
+        def query_shard(shard_id, json_payload, headers):
+            """Helper function to query a single shard with pre-serialized payload"""
             with self._monitor_context(f"shard_{shard_id}"):
                 # Skip shard if not valid
                 if shard_id not in self.distributed_indices:
                     return []
 
-                # Prepare payload for POST request
-                payload = {
-                    "q_emb": q_emb,
-                    "k": k,
-                    "complexity": complexity
-                }
-
-                # Send POST request with embedding in body
+                # Send POST request with pre-serialized JSON string
                 url = self.distributed_indices[shard_id]
-                response = self.session.post(url, json=payload)
+                response = self.session.post(url, data=json_payload, headers=headers)
 
                 shard_results = []
                 if response.status_code == 200:
@@ -225,8 +244,8 @@ class FineWebSearcher:
 
                 # Use ThreadPoolExecutor to query shards in parallel
                 with ThreadPoolExecutor(max_workers=num_of_shards) as executor:
-                    # Submit tasks for each shard and collect results
-                    future_to_shard = {executor.submit(query_shard, shard_id, q_emb, complexity): shard_id
+                    # Submit tasks for each shard with shared pre-serialized payload
+                    future_to_shard = {executor.submit(query_shard, shard_id, json_payload, headers): shard_id
                                        for shard_id in range(num_of_shards)}
 
                     # Collect results as they complete
@@ -235,7 +254,7 @@ class FineWebSearcher:
             else:
                 # Original sequential implementation
                 for shard_id in range(num_of_shards):
-                    raw_docs.extend(query_shard(shard_id, q_emb, complexity))
+                    raw_docs.extend(query_shard(shard_id, json_payload, headers))
 
         # Step 3: Result aggregation and reranking
         with self._monitor_context("result_aggregation"):

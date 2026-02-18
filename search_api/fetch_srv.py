@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
 
     # Display service information
     ip_address = get_ip_address()
-    port = 51001
+    port = 51005
     logger.info(f"Fetch service is accessible at: http://{ip_address}:{port}")
     logger.info(f"API documentation available at: http://{ip_address}:{port}/docs")
 
